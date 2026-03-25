@@ -1,10 +1,12 @@
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi.testclient import TestClient
+from main import app
+from db import get_db
 
 DB_URL = os.getenv("TEST_DATABASE_URL", "postgresql://ctv:ctv_password@localhost:5432/ctv")
 
@@ -24,9 +26,6 @@ def test_conn():
 @pytest.fixture(scope="session")
 def client(test_conn):
     """TestClient with DB dependency overridden to use the test database."""
-    from api.main import app
-    from api.db import get_db
-
     def override_get_db():
         yield test_conn
 

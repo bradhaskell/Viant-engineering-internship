@@ -6,7 +6,15 @@ def test_health(client):
 
 import psycopg2
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../transformer"))
+import importlib.util as _ilu
+
+# Load transformer main by absolute path to avoid colliding with api's 'main' in sys.modules
+_transformer_path = os.path.join(os.path.dirname(__file__), "../../transformer/main.py")
+_spec = _ilu.spec_from_file_location("transformer_main", _transformer_path)
+_transformer_main = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_transformer_main)
+run_campaign_metrics = _transformer_main.run_campaign_metrics
+run_hourly_stats = _transformer_main.run_hourly_stats
 
 
 def seed_campaign(conn, campaign_id: str = "camp_001"):
@@ -32,7 +40,6 @@ def seed_campaign(conn, campaign_id: str = "camp_001"):
             )
     conn.commit()
     # Run transformer to populate aggregated tables
-    from main import run_campaign_metrics, run_hourly_stats
     run_campaign_metrics(conn)
     run_hourly_stats(conn)
 

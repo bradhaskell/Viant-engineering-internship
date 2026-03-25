@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from ..db import get_db
+from db import get_db
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
