@@ -45,12 +45,12 @@ if not campaigns:
 campaign_ids = [c["campaign_id"] for c in campaigns]
 selected = st.sidebar.selectbox("Select Campaign", campaign_ids)
 
-auto_refresh = st.sidebar.checkbox("Auto-refresh (30s)", value=False)
-if auto_refresh:
-    st.cache_data.clear()
-
 # --- KPI Cards ---
-metrics = fetch_campaign(selected)
+try:
+    metrics = fetch_campaign(selected)
+except Exception as e:
+    st.error(f"Failed to load campaign data for '{selected}': {e}")
+    st.stop()
 ctv_pct = (
     round(metrics["ctv_impressions"] / metrics["impressions"] * 100, 1)
     if metrics["impressions"]
@@ -72,8 +72,13 @@ try:
     df["hour"] = pd.to_datetime(df["hour"])
     fig = px.line(df, x="hour", y="impressions", title=f"{selected} — Hourly Impressions")
     st.plotly_chart(fig, use_container_width=True)
-except Exception:
-    st.info("No hourly data available yet.")
+except requests.HTTPError as e:
+    if e.response is not None and e.response.status_code == 404:
+        st.info("No hourly data available yet.")
+    else:
+        st.error(f"Failed to load hourly data: {e}")
+except Exception as e:
+    st.error(f"Failed to load hourly data: {e}")
 
 # --- CTV vs Non-CTV Donut Chart ---
 st.subheader("CTV vs. Non-CTV Impressions")
