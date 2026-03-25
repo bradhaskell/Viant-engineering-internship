@@ -139,3 +139,14 @@ def test_hourly_stats_bucketed_correctly(conn):
         )
         row = cur.fetchone()
     assert row["cnt"] == 2
+
+
+def test_campaign_metrics_no_events_produces_no_rows(conn):
+    # Seed no events for test_camp — transformation should produce no rows
+    run_transformations(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) as cnt FROM transformed.campaign_metrics WHERE campaign_id = 'test_camp'"
+        )
+        row = cur.fetchone()
+    assert row["cnt"] == 0

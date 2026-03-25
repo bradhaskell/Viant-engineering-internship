@@ -15,21 +15,21 @@ def load_sql(filename: str) -> str:
     return (QUERIES_DIR / filename).read_text()
 
 
-def run_campaign_metrics(conn) -> None:
+def run_campaign_metrics(conn: psycopg2.extensions.connection) -> None:
     sql = load_sql("campaign_metrics.sql")
     with conn.cursor() as cur:
         cur.execute(sql)
     conn.commit()
 
 
-def run_hourly_stats(conn) -> None:
+def run_hourly_stats(conn: psycopg2.extensions.connection) -> None:
     sql = load_sql("hourly_stats.sql")
     with conn.cursor() as cur:
         cur.execute(sql)
     conn.commit()
 
 
-def _connect():
+def _connect() -> psycopg2.extensions.connection:
     """Connect to PostgreSQL, retrying until successful."""
     required = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]
     missing = [v for v in required if not os.getenv(v)]
