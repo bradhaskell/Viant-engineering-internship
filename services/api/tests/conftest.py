@@ -11,9 +11,14 @@ DB_URL = os.getenv("TEST_DATABASE_URL", "postgresql://ctv:ctv_password@localhost
 
 @pytest.fixture(scope="session")
 def test_conn():
-    conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
-    yield conn
-    conn.close()
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+    except psycopg2.OperationalError as e:
+        pytest.skip(f"Test database unavailable at {DB_URL}: {e}")
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 @pytest.fixture(scope="session")
@@ -25,10 +30,12 @@ def client(test_conn):
     def override_get_db():
         yield test_conn
 
-    app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    try:
+        app.dependency_overrides[get_db] = override_get_db
+        with TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.clear()
 
 
 @pytest.fixture(autouse=True)
