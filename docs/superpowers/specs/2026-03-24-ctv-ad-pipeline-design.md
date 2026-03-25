@@ -95,6 +95,7 @@ Airflow replaces the standalone transformer. Aggregated data lands in BigQuery �
 | advertiser_id | VARCHAR | |
 | publisher_id | VARCHAR | |
 | content_type | VARCHAR | `ctv`, `mobile`, `desktop` |
+| device_id | VARCHAR | Synthetic unique device identifier (e.g. `dev_<uuid4>`), used for `unique_devices` count |
 | device_type | VARCHAR | `smart_tv`, `roku`, `fire_tv`, `desktop` |
 | bid_price | NUMERIC(10,4) | CPM in USD |
 | geo_region | VARCHAR | US region |
@@ -110,7 +111,7 @@ Airflow replaces the standalone transformer. Aggregated data lands in BigQuery �
 | ctr | NUMERIC | clicks / impressions |
 | total_spend | NUMERIC | Sum of bid prices |
 | avg_bid_price | NUMERIC | |
-| unique_devices | INTEGER | `COUNT(DISTINCT device_type \|\| publisher_id)` in PostgreSQL; `APPROX_COUNT_DISTINCT` in BigQuery |
+| unique_devices | INTEGER | `COUNT(DISTINCT device_id)` in PostgreSQL; `APPROX_COUNT_DISTINCT(device_id)` in BigQuery |
 | ctv_impressions | INTEGER | CTV-specific subset |
 | updated_at | TIMESTAMPTZ | |
 
@@ -179,12 +180,14 @@ Built with **FastAPI**. Dashboard is the only consumer — no direct DB access f
 
 ```
 GET  /health
-GET  /campaigns
+GET  /campaigns                         ← no filters in Tier 1
 GET  /campaigns/{campaign_id}
 GET  /campaigns/{campaign_id}/hourly
 ```
 
 ### Tier 2 Additions
+
+`GET /campaigns` gains optional query parameters in Tier 2 (same endpoint, backward-compatible):
 
 ```
 GET  /campaigns?start_date=&end_date=&content_type=&limit=&offset=
@@ -193,9 +196,9 @@ POST /events
 GET  /campaigns/{campaign_id}/publishers
 ```
 
-**`POST /events`** — manually inject a single synthetic ad event for testing purposes. Bypasses Kafka and writes directly to `raw.events`. Useful for demoing live data flowing through the pipeline during an interview without running the full generator. Returns the created event_id.
+**`POST /events`** — manually injects a single synthetic ad event directly into `raw.events`, bypassing Kafka. Intended for interview demos: shows a live event flowing through the pipeline without needing the full generator running. Request body matches `raw.events` schema (all fields except `event_id` and `created_at`). Response: `{"event_id": "<uuid>", "status": "inserted"}`.
 
-Request body matches the `raw.events` schema (all fields except `event_id` and `created_at`, which are auto-generated). Response: `{"event_id": "<uuid>", "status": "inserted"}`.
+Note on `ingestion_log`: Events injected via this endpoint are written with `kafka_offset: null` and `kafka_partition: null` in `raw.ingestion_log`, and `status: "manual"`. This is a known and intentional gap — the endpoint exists for demo convenience, not production use.
 
 ### Tier 3 Addition: CTR Prediction
 
@@ -218,14 +221,16 @@ Response:
 ```json
 {
   "predicted_ctr": 0.024,
-  "confidence": 0.81,
+  "click_probability": 0.81,
   "model_version": "v1.2"
 }
 ```
 
-Model: scikit-learn **GradientBoostingClassifier**, trained on synthetic `raw.events` data. Features: `content_type`, `device_type`, `geo_region`, `bid_price`, `hour_of_day`. Target: binary click indicator (1 if `event_type == 'click'`, else 0). Uses `.feature_importances_` for the dashboard feature importance chart.
+`click_probability` is the raw output of `GradientBoostingClassifier.predict_proba()[:, 1]` — the model's estimated probability that the event results in a click. It is not a calibrated confidence interval; the field name reflects this accurately.
 
-The model is trained by `services/api/models/train.py`, a standalone script that reads from PostgreSQL, trains the model, and serializes it to `ml_model.pkl`. The script is run once manually (or as a Tier 3 Airflow DAG step) before API startup. The API loads the `.pkl` at startup via `joblib.load()`.
+Model: scikit-learn **GradientBoostingClassifier**, trained on synthetic `raw.events` data. Features: `content_type`, `device_type`, `geo_region`, `bid_price`, `hour_of_day` (categorical features one-hot encoded). Target: binary click indicator (1 if `event_type == 'click'`, else 0). Uses `.feature_importances_` for the dashboard feature importance chart.
+
+The model is trained by `services/api/models/train.py`, a standalone script that reads from PostgreSQL, trains the model, and serializes it to `ml_model.pkl` via `joblib.dump()`. The script is run once manually before Tier 3 startup, or as a step in the Airflow DAG. The API loads the `.pkl` at startup via `joblib.load()`. `ml_model.pkl` is listed in `.gitignore` — it is a generated artifact, not committed to source control. In Tier 3 cloud deployment, the trained model is stored in GCS and downloaded by the API container at startup.
 
 ---
 
@@ -235,7 +240,7 @@ Built with **Streamlit**, consuming only the FastAPI layer.
 
 ### Tier 1: Campaign Analytics View
 - Campaign selector dropdown
-- KPI cards: Impressions, Clicks, CTR, Total Spend, CTV %
+- KPI cards: Impressions, Clicks, CTR, Total Spend, CTV % (computed client-side as `ctv_impressions / impressions` from the `GET /campaigns/{campaign_id}` response)
 - Hourly impressions line chart
 - CTV vs. non-CTV donut chart
 
@@ -247,8 +252,8 @@ Built with **Streamlit**, consuming only the FastAPI layer.
 
 ### Tier 3 Addition: CTR Prediction Panel
 - Input form: content type, device, region, bid price, hour of day
-- Live prediction result with confidence bar
-- Feature importance chart
+- Live prediction result with `click_probability` bar (0–1 scale)
+- Feature importance bar chart (from `GradientBoostingClassifier.feature_importances_`)
 
 ---
 
@@ -286,7 +291,19 @@ These values are set via environment variables in `docker-compose.kafka.yml` and
 
 ### Tier 3: Airflow + BigQuery + Kubernetes
 
-**Local:** Airflow added to Docker Compose. DAG runs transformer → BigQuery load on schedule.
+**Local:** Airflow added to Docker Compose. DAG `ctv_pipeline_dag` runs on an `@hourly` schedule with the following task chain:
+
+```
+extract_from_postgres → load_raw_to_bigquery → run_bq_transforms → export_raw_to_gcs → train_ml_model
+```
+
+| Task | What it does |
+|---|---|
+| `extract_from_postgres` | Queries new rows from `raw.events` since last run watermark |
+| `load_raw_to_bigquery` | Loads extracted rows into `viant_raw.events` via BigQuery Storage Write API |
+| `run_bq_transforms` | Executes SQL to rebuild `viant_analytics.campaign_metrics`, `hourly_stats`, `publisher_metrics`, `advertiser_summary` |
+| `export_raw_to_gcs` | Archives the extracted batch as a Parquet file in GCS (`gs://ctv-ad-pipeline/raw/YYYY/MM/DD/`) |
+| `train_ml_model` | Runs `train.py` against updated data, uploads new `ml_model.pkl` to GCS |
 
 **Cloud:**
 | Component | GCP Service |
@@ -352,14 +369,16 @@ ctv-ad-pipeline/
 │   │   │   └── predict.py          # Tier 3
 │   │   ├── models/
 │   │   │   ├── train.py            # Tier 3 — trains GradientBoostingClassifier, outputs ml_model.pkl
-│   │   │   └── ml_model.pkl        # Tier 3 — generated by train.py, loaded at API startup
+│   │   │   └── ml_model.pkl        # Tier 3 — generated artifact, listed in .gitignore
 │   │   └── requirements.txt
 │   └── dashboard/
 │       ├── Dockerfile
 │       ├── app.py
 │       └── requirements.txt
 ├── db/
-│   └── init.sql                    # Schema creation
+│   ├── init.sql                    # Tier 1 schema: raw.events, transformed.campaign_metrics, transformed.hourly_stats
+│   └── migrations/
+│       └── 002_tier2_tables.sql    # Tier 2 additions: transformed.publisher_metrics, raw.ingestion_log
 ├── dags/                           # Tier 3 — Airflow DAGs
 │   └── ctv_pipeline_dag.py
 ├── terraform/                      # Tier 3
@@ -376,10 +395,25 @@ ctv-ad-pipeline/
 
 ## Success Criteria
 
-- `docker-compose up` starts the full pipeline locally with no manual steps
-- Generator produces synthetic CTV events continuously
-- Transformer aggregates raw events into campaign metrics
-- API returns correct JSON for all endpoints
+### Tier 1
+- `docker-compose up` starts all 5 services with no manual steps
+- Generator produces synthetic CTV events continuously into PostgreSQL
+- Transformer aggregates raw events into `campaign_metrics` and `hourly_stats`
+- All four API endpoints return correct JSON
 - Dashboard displays live campaign data pulled from the API
-- All services deployed to GCP and accessible via public URLs
-- README explains the architecture, how to run it, and maps it to Viant's stack
+- API and dashboard deployed to GCP Cloud Run; database on Cloud SQL
+
+### Tier 2
+- All Tier 1 criteria still pass
+- Generator publishes events to Kafka; ingestion consumer writes to PostgreSQL
+- `raw.ingestion_log` records all consumed events with correct offset/partition
+- `POST /events` manual injection works and creates `status: "manual"` log entry
+- `GET /campaigns/{id}/publishers` returns publisher breakdown from `publisher_metrics`
+
+### Tier 3
+- All Tier 2 criteria still pass
+- Airflow DAG runs on `@hourly` schedule; all 5 tasks complete successfully
+- Aggregated data lands in BigQuery `viant_analytics` dataset
+- API correctly queries BigQuery for all analytics endpoints
+- `train.py` produces a valid `ml_model.pkl`; `POST /predict/ctr` returns predictions
+- README explains the architecture, how to run each tier, and maps the stack to Viant's platform
