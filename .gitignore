@@ -6,3 +6,21 @@ __pycache__/
 services/api/models/ml_model.pkl
 *.egg-info/
 .DS_Store
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE configuration
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+dist/
+build/
+*.egg
+pip-log.txt
