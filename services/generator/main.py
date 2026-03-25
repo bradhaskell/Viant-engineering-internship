@@ -56,24 +56,60 @@ def insert_event(conn, event: dict) -> None:
     conn.commit()
 
 
-def main():
-    interval = float(os.getenv("GENERATOR_INTERVAL_SECONDS", "1"))
-    conn = psycopg2.connect(
-        host=os.environ["DB_HOST"],
-        port=os.getenv("DB_PORT", "5432"),
-        dbname=os.environ["DB_NAME"],
-        user=os.environ["DB_USER"],
-        password=os.environ["DB_PASSWORD"],
-    )
-    logger.info("Generator started. Inserting 1 event every %.1fs", interval)
-    count = 0
+def _connect() -> "psycopg2.connection":
+    """Connect to PostgreSQL, retrying until successful."""
+    required = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]
+    missing = [v for v in required if not os.getenv(v)]
+    if missing:
+        raise EnvironmentError(f"Missing required environment variables: {missing}")
+
     while True:
-        event = generate_event()
-        insert_event(conn, event)
-        count += 1
-        if count % 100 == 0:
-            logger.info("Inserted %d events", count)
-        time.sleep(interval)
+        try:
+            conn = psycopg2.connect(
+                host=os.environ["DB_HOST"],
+                port=int(os.getenv("DB_PORT", "5432")),
+                dbname=os.environ["DB_NAME"],
+                user=os.environ["DB_USER"],
+                password=os.environ["DB_PASSWORD"],
+            )
+            logger.info("Connected to database")
+            return conn
+        except psycopg2.OperationalError as e:
+            logger.error("DB connection failed: %s — retrying in 5s", e)
+            time.sleep(5)
+
+
+def main():
+    try:
+        interval_str = os.getenv("GENERATOR_INTERVAL_SECONDS", "1")
+        try:
+            interval = float(interval_str)
+        except ValueError:
+            logger.warning("Invalid GENERATOR_INTERVAL_SECONDS=%r, using 1.0", interval_str)
+            interval = 1.0
+
+        conn = _connect()
+        logger.info("Generator started. Inserting 1 event every %.1fs", interval)
+        count = 0
+        try:
+            while True:
+                try:
+                    event = generate_event()
+                    insert_event(conn, event)
+                    count += 1
+                    if count % 100 == 0:
+                        logger.info("Inserted %d events", count)
+                except psycopg2.DatabaseError as e:
+                    logger.error("Insert failed: %s — reconnecting", e)
+                    conn.rollback()
+                    conn.close()
+                    conn = _connect()
+                time.sleep(interval)
+        finally:
+            conn.close()
+    except EnvironmentError as e:
+        logger.critical(str(e))
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
