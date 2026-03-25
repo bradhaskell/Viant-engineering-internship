@@ -39,8 +39,8 @@ def get_campaign(campaign_id: str, conn=Depends(get_db)):
                     SUM(clicks)::NUMERIC / NULLIF(SUM(impressions), 0), 4
                 )                                                              AS ctr,
                 ROUND(SUM(total_spend), 2)                                     AS total_spend,
-                ROUND(AVG(avg_bid_price), 4)                                   AS avg_bid_price,
-                SUM(unique_devices)                                            AS unique_devices,
+                ROUND(AVG(avg_bid_price), 4)                                   AS avg_daily_bid_price,
+                SUM(unique_devices)                                            AS total_device_days,
                 SUM(ctv_impressions)                                           AS ctv_impressions
             FROM transformed.campaign_metrics
             WHERE campaign_id = %s
