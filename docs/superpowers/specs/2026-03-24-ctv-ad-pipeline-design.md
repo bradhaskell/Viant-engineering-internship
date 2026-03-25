@@ -110,7 +110,7 @@ Airflow replaces the standalone transformer. Aggregated data lands in BigQuery �
 | ctr | NUMERIC | clicks / impressions |
 | total_spend | NUMERIC | Sum of bid prices |
 | avg_bid_price | NUMERIC | |
-| unique_devices | INTEGER | |
+| unique_devices | INTEGER | `COUNT(DISTINCT device_type \|\| publisher_id)` in PostgreSQL; `APPROX_COUNT_DISTINCT` in BigQuery |
 | ctv_impressions | INTEGER | CTV-specific subset |
 | updated_at | TIMESTAMPTZ | |
 
@@ -123,7 +123,19 @@ Airflow replaces the standalone transformer. Aggregated data lands in BigQuery �
 | clicks | INTEGER | |
 | spend | NUMERIC | |
 
-### Tier 2 Addition: Ingestion Tracking
+### Tier 2 Addition: Publisher Metrics + Ingestion Tracking
+
+**`transformed.publisher_metrics`** (daily rollup per campaign + publisher, supports `GET /campaigns/{campaign_id}/publishers`)
+| Column | Type | Notes |
+|---|---|---|
+| campaign_id | VARCHAR | |
+| publisher_id | VARCHAR | |
+| date | DATE | |
+| impressions | INTEGER | |
+| clicks | INTEGER | |
+| ctr | NUMERIC | clicks / impressions |
+| spend | NUMERIC | |
+| PRIMARY KEY | (campaign_id, publisher_id, date) | |
 
 **`raw.ingestion_log`**
 | Column | Type | Notes |
@@ -140,8 +152,22 @@ Airflow replaces the standalone transformer. Aggregated data lands in BigQuery �
 
 | Dataset | Tables | Purpose |
 |---|---|---|
-| `viant_raw` | `events` | Raw events promoted from PostgreSQL |
-| `viant_analytics` | `campaign_metrics`, `hourly_stats`, `advertiser_summary` | SQL-transformed reporting tables |
+| `viant_raw` | `events` | Raw events promoted from PostgreSQL staging |
+| `viant_analytics` | `campaign_metrics`, `hourly_stats`, `publisher_metrics`, `advertiser_summary` | SQL-transformed reporting tables |
+
+**`viant_analytics.advertiser_summary`** (daily rollup across all campaigns per advertiser)
+| Column | Type | Notes |
+|---|---|---|
+| advertiser_id | STRING | |
+| date | DATE | |
+| total_campaigns | INTEGER | COUNT DISTINCT campaign_id |
+| total_impressions | INTEGER | |
+| total_clicks | INTEGER | |
+| overall_ctr | NUMERIC | total_clicks / total_impressions |
+| total_spend | NUMERIC | |
+| PRIMARY KEY | (advertiser_id, date) | |
+
+Used by the `GET /advertisers/{advertiser_id}/campaigns` endpoint to provide an advertiser-level rollup alongside per-campaign detail.
 
 ---
 
@@ -166,6 +192,10 @@ GET  /advertisers/{advertiser_id}/campaigns
 POST /events
 GET  /campaigns/{campaign_id}/publishers
 ```
+
+**`POST /events`** — manually inject a single synthetic ad event for testing purposes. Bypasses Kafka and writes directly to `raw.events`. Useful for demoing live data flowing through the pipeline during an interview without running the full generator. Returns the created event_id.
+
+Request body matches the `raw.events` schema (all fields except `event_id` and `created_at`, which are auto-generated). Response: `{"event_id": "<uuid>", "status": "inserted"}`.
 
 ### Tier 3 Addition: CTR Prediction
 
@@ -193,7 +223,9 @@ Response:
 }
 ```
 
-Model: scikit-learn logistic regression or gradient boosting, trained on synthetic `raw.events` data, loaded at API startup.
+Model: scikit-learn **GradientBoostingClassifier**, trained on synthetic `raw.events` data. Features: `content_type`, `device_type`, `geo_region`, `bid_price`, `hour_of_day`. Target: binary click indicator (1 if `event_type == 'click'`, else 0). Uses `.feature_importances_` for the dashboard feature importance chart.
+
+The model is trained by `services/api/models/train.py`, a standalone script that reads from PostgreSQL, trains the model, and serializes it to `ml_model.pkl`. The script is run once manually (or as a Tier 3 Airflow DAG step) before API startup. The API loads the `.pkl` at startup via `joblib.load()`.
 
 ---
 
@@ -240,6 +272,17 @@ Built with **Streamlit**, consuming only the FastAPI layer.
 - Bitnami Kafka image added to Docker Compose (single-broker, KRaft mode — no Zookeeper)
 - `ingestion` consumer service added
 - Cloud option: swap local Kafka for **GCP Pub/Sub** (Viant's cloud-native equivalent)
+
+**Kafka topic configuration:**
+| Setting | Value |
+|---|---|
+| Topic name | `ctv_ad_events` |
+| Partitions | 3 |
+| Replication factor | 1 (single-broker dev setup) |
+| Retention | 7 days |
+| Consumer group ID | `ctv-ingestion-group` |
+
+These values are set via environment variables in `docker-compose.kafka.yml` and consumed by both the generator (producer) and ingestion (consumer) services.
 
 ### Tier 3: Airflow + BigQuery + Kubernetes
 
@@ -297,7 +340,8 @@ ctv-ad-pipeline/
 │   │   ├── main.py
 │   │   ├── queries/
 │   │   │   ├── campaign_metrics.sql
-│   │   │   └── hourly_stats.sql
+│   │   │   ├── hourly_stats.sql
+│   │   │   └── publisher_metrics.sql   # Tier 2
 │   │   └── requirements.txt
 │   ├── api/
 │   │   ├── Dockerfile
@@ -307,7 +351,8 @@ ctv-ad-pipeline/
 │   │   │   ├── advertisers.py
 │   │   │   └── predict.py          # Tier 3
 │   │   ├── models/
-│   │   │   └── ml_model.pkl        # Tier 3
+│   │   │   ├── train.py            # Tier 3 — trains GradientBoostingClassifier, outputs ml_model.pkl
+│   │   │   └── ml_model.pkl        # Tier 3 — generated by train.py, loaded at API startup
 │   │   └── requirements.txt
 │   └── dashboard/
 │       ├── Dockerfile
