@@ -1,0 +1,81 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ctv
+      POSTGRES_USER: ctv
+      POSTGRES_PASSWORD: ctv_password
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ctv -d ctv"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  generator:
+    build: ./services/generator
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ctv
+      DB_USER: ctv
+      DB_PASSWORD: ctv_password
+      GENERATOR_INTERVAL_SECONDS: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  transformer:
+    build: ./services/transformer
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ctv
+      DB_USER: ctv
+      DB_PASSWORD: ctv_password
+      TRANSFORMER_INTERVAL_SECONDS: 30
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build: ./services/api
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ctv
+      DB_USER: ctv
+      DB_PASSWORD: ctv_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  dashboard:
+    build: ./services/dashboard
+    environment:
+      API_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
