@@ -1,6 +1,7 @@
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from fastapi import HTTPException
 
 
 def get_db():
@@ -9,14 +10,17 @@ def get_db():
     if missing:
         raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
 
-    conn = psycopg2.connect(
-        host=os.environ["DB_HOST"],
-        port=int(os.getenv("DB_PORT", "5432")),
-        dbname=os.environ["DB_NAME"],
-        user=os.environ["DB_USER"],
-        password=os.environ["DB_PASSWORD"],
-        cursor_factory=RealDictCursor,
-    )
+    try:
+        conn = psycopg2.connect(
+            host=os.environ["DB_HOST"],
+            port=int(os.getenv("DB_PORT", "5432")),
+            dbname=os.environ["DB_NAME"],
+            user=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"],
+            cursor_factory=RealDictCursor,
+        )
+    except psycopg2.OperationalError as e:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
     try:
         yield conn
     finally:

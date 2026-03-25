@@ -6,12 +6,14 @@ def test_health(client):
 
 import psycopg2
 import sys, os
-import importlib.util as _ilu
+import importlib.util
+from pathlib import Path
 
 # Load transformer main by absolute path to avoid colliding with api's 'main' in sys.modules
-_transformer_path = os.path.join(os.path.dirname(__file__), "../../transformer/main.py")
-_spec = _ilu.spec_from_file_location("transformer_main", _transformer_path)
-_transformer_main = _ilu.module_from_spec(_spec)
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_transformer_path = _REPO_ROOT / "services" / "transformer" / "main.py"
+_spec = importlib.util.spec_from_file_location("transformer_main", _transformer_path)
+_transformer_main = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_transformer_main)
 run_campaign_metrics = _transformer_main.run_campaign_metrics
 run_hourly_stats = _transformer_main.run_hourly_stats
