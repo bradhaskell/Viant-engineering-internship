@@ -84,6 +84,8 @@ def main():
         interval_str = os.getenv("GENERATOR_INTERVAL_SECONDS", "1")
         try:
             interval = float(interval_str)
+            if interval <= 0:
+                raise ValueError("Interval must be positive")
         except ValueError:
             logger.warning("Invalid GENERATOR_INTERVAL_SECONDS=%r, using 1.0", interval_str)
             interval = 1.0
